@@ -1,2 +1,3 @@
-# php-streamfilter-openssl
-Encryption/Decryption stream filter implementation in native.
+# php-openssl-filter
+
+OpenSSL encryption/decryption stream filter implementation in native.
