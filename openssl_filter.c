@@ -6,9 +6,39 @@
 ZEND_GET_MODULE(openssl_filter)
 #endif
 
+#define XSTR(s) STR(s)
+#define STR(s) #s
+#define PHP_OPENSSL_FILTER_ASSIGN_PARAM_STR_LEN(_param_name, _len_param_name) \
+    do { \
+        zval *tmpzval; \
+        if ((tmpzval = zend_hash_str_find(Z_ARRVAL_P(filter_params), ZEND_STRL(XSTR(_param_name))))) { \
+            if (Z_TYPE_P(tmpzval) == IS_STRING) { \
+                _param_name = Z_STRVAL_P(tmpzval); \
+                _len_param_name = Z_STRLEN_P(tmpzval); \
+            } else {
+                php_error_docref(NULL, E_WARNING, "Parameter " XSTR(_param_name) " must be string, ignoring"); \
+            } \
+        } \
+    } while (0)
+#define PHP_OPENSSL_FILTER_ASSIGN_PARAM_LONG_NATURAL(_param_name) \
+    do { \
+        zval *tmpzval; \
+        if ((tmpzval = zend_hash_str_find(Z_ARRVAL_P(filter_params), ZEND_STRL(XSTR(_param_name))))) { \
+            if (Z_TYPE_P(tmpzval) == IS_LONG && Z_LVAL_P(tmpzval) >= 0) { \
+                _param_name = Z_STRVAL_P(tmpzval); \
+            } else {
+                php_error_docref(NULL, E_WARNING, "Parameter " XSTR(_param_name) " must be non-negative integer, ignoring"); \
+            } \
+        } \
+    } while (0)
+
 typedef struct _php_openssl_filter_data {
     EVP_CIPHER_CTX ctx;
     char persistent;
+    char is_aead;
+    int aead_get_tag_flag;
+    int aead_set_tag_flag;
+    int aead_ivlen_flag;
 } php_openssl_filter_data;
 
 static php_stream_filter_status_t php_openssl_filter(
@@ -93,29 +123,53 @@ static php_stream_filter_ops php_openssl_filter_ops = {
     "openssl.*"
 };
 
-static php_stream_filter *php_openssl_filter_create(const char *filtername, zval *filterparams, uint8_t persistent)
+static php_stream_filter *php_openssl_filter_create(const char *filter_name, zval *filter_params, uint8_t persistent)
 {
-    EVP_CIPHER_CTX *ctx;
     const char encrypt;
-    char *data, *method, *password, *iv = "", *add = "";
-    size_t data_len, method_len, password_len, iv_len = 0, aad_len = 0;
     const EVP_CIPHER *cipher_type;
-    EVP_CIPHER_CTX *cipher_ctx;
-    zval *tmpzval;
 
-    if (!filterparams || Z_TYPE_P(filterparams) != IS_ARRAY) {
-        php_error_docref(NULL, E_WARNING, "Filter parameters for %s must be an array", filtername);
+    char *password = NULL, *iv = NULL, *aad = NULL, *tag = NULL;
+    size_t password_len = 0, iv_len = 0, aad_len = 0, tag_len = 16;
+
+    php_openssl_filter_data *data;
+
+    cipher_type = EVP_get_cipherbyname(filter_name + sizeof("openssl_**crypt.") - 1);
+    if (!cipher_type) {
+        php_error_docref(NULL, E_WARNING, "Unknown cipher algorithm");
         return NULL;
     }
-
-    if ((tmpzval = zend_hash_str_find(Z_ARRVAL_P(filterparams), ZEND_STRL("mode")))) {
-        if (Z_TYPE_P(tmpzval) == IS_STRING) {
-            mode = Z_STRVAL_P(tmpzval);
+    if (filter_params) {
+        if (Z_TYPE_P(filter_params) != IS_ARRAY) {
+            php_error_docref(NULL, E_WARNING, "Filter parameters for %s must be an array, ignoring", filter_name);
         } else {
-            php_error_docref(NULL, E_WARNING, "mode is not a string, ignoring");
+            PHP_OPENSSL_FILTER_ASSIGN_PARAM_STR_LEN(password, password_len);
+            PHP_OPENSSL_FILTER_ASSIGN_PARAM_STR_LEN(iv, iv_len);
+            PHP_OPENSSL_FILTER_ASSIGN_PARAM_STR_LEN(aad, aad_len);
+            PHP_OPENSSL_FILTER_ASSIGN_PARAM_LONG_NATURAL(tag);
+            PHP_OPENSSL_FILTER_ASSIGN_PARAM_LONG_NATURAL(tag);
         }
     }
 
+    encrypt = filter_name[sizeof("openssl_") - 1] == 'e';
+    data = pemalloc(sizeof(php_openssl_filter_data), persistent);
+
+    switch (EVP_CIPHER_mode(cipher_type)) {
+#ifdef EVP_CIPH_GCM_MODE
+        case EVP_CIPH_GCM_MODE:
+            data->is_aead = 1;
+            data->aead_get_tag_flag = EVP_CTRL_GCM_GET_TAG;
+            data->aead_set_tag_flag = EVP_CTRL_GCM_SET_TAG;
+            data->aead_ivlen_flag = EVP_CTRL_GCM_SET_IVLEN;
+            break;
+#endif
+#ifdef EVP_CIPH_CCM_MODE
+        case EVP_CIPH_CCM_MODE:
+            php_error_docref(NULL, E_WARNING, "Currently CCM mode is unsupported");
+            return NULL;
+#endif
+        default:
+            memset(mode, 0, sizeof(struct php_openssl_cipher_mode));
+    }
 
     EVP_CIPHER_CTX_init(ctx);
     if (encrypt) {
@@ -123,8 +177,6 @@ static php_stream_filter *php_openssl_filter_create(const char *filtername, zval
     } else {
         EVP_DecryptInit_ex(ctx,method,NULL,(unsigned char *)key,iv);
     }
-    encrypt = filtername[8] == 'e';
-    php_openssl_filter_data *data;
 
     data = pemalloc(sizeof(php_openssl_filter_data, persistent));
 }
